@@ -208,7 +208,7 @@ class GNN(nn.Module):
         self.gnns = nn.ModuleList()
         for layer in range(num_layer):
             if gnn_type == "gin":
-                self.gnns.append(GINConv(emb_dim, aggr="add"))
+                self.gnns.append(GINConv(emb_dim, aggr="add")) # GIN模型中存在self.mlp(aggr_out)，等同于GNN-3D中的lin1 → act → lin2
             elif gnn_type == "gcn":
                 self.gnns.append(GCNConv(emb_dim))
             elif gnn_type == "gat":
@@ -224,18 +224,19 @@ class GNN(nn.Module):
     # def forward(self, x, edge_index, edge_attr):
     def forward(self, *argv):
         if len(argv) == 3:
-            x, edge_index, edge_attr = argv[0], argv[1], argv[2]
+            x, edge_index, edge_attr = argv[0], argv[1], argv[2]  # [11584, 2], [2, 24172], [24172, 2]
         elif len(argv) == 1:
             data = argv[0]
-            x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
+            x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr 
         else:
             raise ValueError("unmatched number of arguments.")
 
-        x = self.x_embedding1(x[:, 0]) + self.x_embedding2(x[:, 1])
+        # 这个操作是论文中公式1的 we will apply a transformation function T2D on the topological graph.表述中的 T2D 操作。
+        x = self.x_embedding1(x[:, 0]) + self.x_embedding2(x[:, 1]) # 原子特征的Embedding，atom type + chirality tag
 
         h_list = [x]
         for layer in range(self.num_layer):
-            h = self.gnns[layer](h_list[layer], edge_index, edge_attr)
+            h = self.gnns[layer](h_list[layer], edge_index, edge_attr) # GIN model进行处理
             h = self.batch_norms[layer](h)
             # h = F.dropout(F.relu(h), self.drop_ratio, training = self.training)
             if layer == self.num_layer - 1:

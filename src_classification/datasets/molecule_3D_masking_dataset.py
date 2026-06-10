@@ -18,7 +18,7 @@ class Molecule3DMaskingDataset(InMemoryDataset):
         self.transform, self.pre_transform, self.pre_filter = transform, pre_transform, pre_filter
 
         if not empty:
-            self.data, self.slices = torch.load(self.processed_paths[0])
+            self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
         print('Dataset: {}\nData: {}'.format(self.dataset, self.data))
 
     def subgraph(self, data):
@@ -58,12 +58,19 @@ class Molecule3DMaskingDataset(InMemoryDataset):
 
     def get(self, idx):
         data = Data()
-        for key in self.data.keys:
+        keys = self.data.keys()
+        if '_smiles' in keys:
+            keys = [k for k in keys if k != '_smiles']  # 过滤掉 _smiles
+
+        for key in keys:
             item, slices = self.data[key], self.slices[key]
             s = list(repeat(slice(None), item.dim()))
             s[data.__cat_dim__(key, item)] = slice(slices[idx], slices[idx + 1])
             data[key] = item[s]
         
+        if hasattr(self.data, '_smiles') and isinstance(self.data._smiles, list):
+            data.__dict__['_smiles'] = self.data._smiles[idx]  # print('smiles', data._smiles)
+
         if self.mask_ratio > 0:
             data = self.subgraph(data)
         return data

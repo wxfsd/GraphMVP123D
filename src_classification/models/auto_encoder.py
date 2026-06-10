@@ -39,8 +39,8 @@ class AutoEncoder(torch.nn.Module):
     def forward(self, x, y):
         if self.detach_target:
             y = y.detach()
-        x = self.fc_layers(x)
-        loss = self.criterion(x, y)
+        x = self.fc_layers(x) # [256, 300] -> [256, 300]
+        loss = self.criterion(x, y) # MSELoss(), [256, 300], [256, 300] -> [1]
 
         return loss
 

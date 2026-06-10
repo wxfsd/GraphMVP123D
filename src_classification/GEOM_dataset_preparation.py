@@ -131,7 +131,7 @@ class Molecule3DDataset(InMemoryDataset):
             root, transform, pre_transform, pre_filter)
 
         if not empty:
-            self.data, self.slices = torch.load(self.processed_paths[0])
+            self.data, self.slices = torch.load(self.processed_paths[0],weights_only=False)
         print('root: {},\ndata: {},\nn_mol: {},\nn_conf: {}'.format(
             self.root, self.data, self.n_mol, self.n_conf))
 
@@ -204,15 +204,38 @@ class Molecule3DDataset(InMemoryDataset):
                     #  export prefix=https://github.com/learningmatter-mit/geom
                     #  Ref: ${prefix}/issues/4#issuecomment-853486681
                     #  Ref: ${prefix}/blob/master/tutorials/02_loading_rdkit_mols.ipynb
-                    conf_list = [
-                        Chem.MolToSmiles(
-                            Chem.MolFromSmiles(
-                                Chem.MolToSmiles(rd_mol['rd_mol'])))
-                        for rd_mol in conformer_list[:self.n_conf]]
 
-                    conf_list_raw = [
-                        Chem.MolToSmiles(rd_mol['rd_mol'])
-                        for rd_mol in conformer_list[:self.n_conf]]
+                    # conf_list = [
+                    #     Chem.MolToSmiles(
+                    #         Chem.MolFromSmiles(
+                    #             Chem.MolToSmiles(rd_mol['rd_mol'])))
+                    #     for rd_mol in conformer_list[:self.n_conf]]
+
+                    # conf_list_raw = [
+                    #     Chem.MolToSmiles(rd_mol['rd_mol'])
+                    #     for rd_mol in conformer_list[:self.n_conf]]
+
+                    #################################################################
+                    conf_list = []
+                    conf_list_raw = []
+                    for rd_mol in conformer_list[:self.n_conf]:
+                        mol = rd_mol['rd_mol']
+                        if mol is None:
+                            continue
+                        try:
+                            smiles_std = Chem.MolToSmiles(Chem.MolFromSmiles(Chem.MolToSmiles(mol)))
+                            smiles_raw = Chem.MolToSmiles(mol)
+                            conf_list.append(smiles_std)
+                            conf_list_raw.append(smiles_raw)
+                        except:
+                            print("[SKIP] Illegal conformer encountered.")
+                            continue
+
+                    if len(conf_list) == 0:
+                        notfound += 1
+                        continue
+                    ################################################################               
+
                     # check that they're all the same
                     same_confs = len(list(set(conf_list))) == 1
                     same_confs_raw = len(list(set(conf_list_raw))) == 1
@@ -311,7 +334,7 @@ if __name__ == '__main__':
     parser.add_argument('--n_mol', type=int, help='number of unique smiles/molecules')
     parser.add_argument('--n_conf', type=int, help='number of conformers of each molecule')
     parser.add_argument('--n_upper', type=int, help='upper bound for number of conformers')
-    parser.add_argument('--data_folder', type=str)
+    parser.add_argument('--data_folder', default='/nfs_home/xiaofeng/zhen/GraphMVP_xf/datasets/GEOM', type=str)
     args = parser.parse_args()
 
     data_folder = args.data_folder
@@ -325,7 +348,7 @@ if __name__ == '__main__':
         n_mol, n_conf, n_upper = args.n_mol, args.n_conf, args.n_upper
         root_2d = '{}/GEOM_2D_nmol{}_nconf{}_nupper{}'.format(data_folder, n_mol, n_conf, n_upper)
         root_3d = '{}/GEOM_3D_nmol{}_nconf{}_nupper{}'.format(data_folder, n_mol, n_conf, n_upper)
-
+        
         # Generate 3D Datasets (2D SMILES + 3D Conformer)
         Molecule3DDataset(root=root_3d, n_mol=n_mol, n_conf=n_conf, n_upper=n_upper)
         # Generate 2D Datasets (2D SMILES)

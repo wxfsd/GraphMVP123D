@@ -5,18 +5,25 @@ parser = argparse.ArgumentParser()
 # about seed and basic info
 parser.add_argument('--seed', type=int, default=42)
 parser.add_argument('--runseed', type=int, default=0)
-parser.add_argument('--device', type=int, default=0)
+parser.add_argument('--device', type=int, default=7)
 
 # about dataset and dataloader
-parser.add_argument('--input_data_dir', type=str, default='')
-parser.add_argument('--dataset', type=str, default='bace')
-parser.add_argument('--num_workers', type=int, default=8)
+parser.add_argument('--input_data_dir', type=str, default='/nfs_home/xiaofeng/zhen/GraphMVP_xf/datasets/SLURM_TMPDIR')
+parser.add_argument('--dataset', type=str, default='GEOM_3D_nmol50000_nconf5_nupper1000_morefeat')
+parser.add_argument('--output_model_dir', type=str, default='/nfs_home/xiaofeng/zhen/GraphMVP_xf/src_regression/testResult/5W-CL-123-fusion-13/')
 
-# about training strategies
+# parser.add_argument('--input_data_dir', type=str, default='')
+# parser.add_argument('--dataset', type=str, default='bace')
+parser.add_argument('--num_workers', type=int, default=32)
+
+# about training strategiess
 parser.add_argument('--split', type=str, default='scaffold')
 parser.add_argument('--batch_size', type=int, default=256)
+
+# parser.add_argument('--epochs', type=int, default=100)
 parser.add_argument('--epochs', type=int, default=100)
-parser.add_argument('--lr', type=float, default=0.001)
+
+parser.add_argument('--lr', type=float, default=0.0001)
 parser.add_argument('--lr_scale', type=float, default=1)
 parser.add_argument('--decay', type=float, default=0)
 
@@ -84,7 +91,7 @@ parser.set_defaults(eval_train=True)
 
 # about loading and saving
 parser.add_argument('--input_model_file', type=str, default='')
-parser.add_argument('--output_model_dir', type=str, default='')
+# parser.add_argument('--output_model_dir', type=str, default='/nfs_home/xiaofeng/zhen/GraphMVP_xf/src_regression/testResult/10W-CL-123/')
 
 # verbosity
 parser.add_argument('--verbose', dest='verbose', action='store_true')
@@ -92,4 +99,4 @@ parser.add_argument('--no_verbose', dest='verbose', action='store_false')
 parser.set_defaults(verbose=False)
 
 args = parser.parse_args()
-print('arguments\t', args)
+# print('arguments\t', args)

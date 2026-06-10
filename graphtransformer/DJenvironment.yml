@@ -1,0 +1,25 @@
+name: graph-transformer
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.7
+  - pip
+  - numpy
+  - pandas
+  - matplotlib
+  - scikit-learn
+  - jupyterlab
+  - ipython
+  - tqdm
+
+  - pip:
+      - torch==1.9.0+cu111
+      - torchvision==0.10.0+cu111
+      - torchaudio==0.9.0
+      - dgl-cu111==0.6.1
+      - torch-scatter==2.0.9
+      - torch-sparse==0.6.12
+      - torch-cluster==1.5.9
+      - torch-spline-conv==1.2.1
+      - torch-geometric==2.2.0

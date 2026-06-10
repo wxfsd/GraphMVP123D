@@ -72,19 +72,20 @@ def train_no_aug(args, device, loader, optimizer):
     else:
         l = loader
     for batch in l:
-        batch = batch.to(device)
+        batch = batch.to(device) # (batch=[11584], edge_attr=[24172, 2], edge_index=[2, 24172], id=[256], mask_node_label=[1868, 2], 
+                                 # masked_atom_indices=[1868], masked_x=[11584, 2], mol_id=[256], positions=[11584, 3], x=[11584, 2])
 
-        node_repr = molecule_model_2D(batch.x, batch.edge_index, batch.edge_attr)
-        molecule_2D_repr = molecule_readout_func(node_repr, batch.batch)
-        molecule_3D_repr = molecule_model_3D(batch.x[:, 0], batch.positions, batch.batch)
+        node_repr = molecule_model_2D(batch.x, batch.edge_index, batch.edge_attr) # [11584, 2], [2, 24172], [24172, 2] -> [11584, 300]
+        molecule_2D_repr = molecule_readout_func(node_repr, batch.batch)  # [11584, 300] -> [256, 300]
+        molecule_3D_repr = molecule_model_3D(batch.x[:, 0], batch.positions, batch.batch) # [11584], [11584, 3], [11584] -> [256, 300]
 
         ##### To obtain 3D-2D SSL loss and acc
-        CL_loss, CL_acc = dual_CL(molecule_2D_repr, molecule_3D_repr, args)
+        CL_loss, CL_acc = dual_CL(molecule_2D_repr, molecule_3D_repr, args) # [256, 300], [256, 300] -> [1], [1]
 
-        AE_loss_1 = AE_2D_3D_model(molecule_2D_repr, molecule_3D_repr)
-        AE_loss_2 = AE_3D_2D_model(molecule_3D_repr, molecule_2D_repr)
+        AE_loss_1 = AE_2D_3D_model(molecule_2D_repr, molecule_3D_repr) # [256, 300], [256, 300] -> [1] # 公式6中的第一项
+        AE_loss_2 = AE_3D_2D_model(molecule_3D_repr, molecule_2D_repr) # [256, 300], [256, 300] -> [1] # 公式6中的第二项
         AE_acc_1 = AE_acc_2 = 0
-        AE_loss = (AE_loss_1 + AE_loss_2) / 2
+        AE_loss = (AE_loss_1 + AE_loss_2) / 2 # L-G = L-VRR = 1/2(左向重建+右向重建) + β⋅KL_terms
 
         ##### To obtain 2D SSL loss and acc
         if args.SSL_2D_mode == 'EP':
@@ -97,8 +98,8 @@ def train_no_aug(args, device, loader, optimizer):
                 molecule_repr=molecule_2D_repr, criterion=criterion,
                 infograph_discriminator_SSL_model=infograph_discriminator_SSL_model)
 
-        elif args.SSL_2D_mode == 'AM':
-            masked_node_repr = molecule_model_2D(batch.masked_x, batch.edge_index, batch.edge_attr)
+        elif args.SSL_2D_mode == 'AM': # GraphMVP-G 模式（公式 8 中的 LGenerative 2D-SSL）对应的 AM（Attribute Masking）子任务损失项。
+            masked_node_repr = molecule_model_2D(batch.masked_x, batch.edge_index, batch.edge_attr) # [11584, 2], [2, 24172], [24172, 2] -> [11584, 300]
             SSL_2D_loss, SSL_2D_acc = do_AttrMasking(
                 batch=batch, criterion=criterion, node_repr=masked_node_repr,
                 molecule_atom_masking_model=molecule_atom_masking_model)
@@ -262,19 +263,29 @@ if __name__ == '__main__':
 
     transform = None
     criterion = None
-    if args.SSL_2D_mode == 'EP':
-        transform = NegativeEdge()
+
+    # GraphMVP-G = Generative  # EP, AM, CP == do_EdgePred, do_AttrMasking, do_ContextPred
+    if args.SSL_2D_mode == 'EP':  
+        transform = NegativeEdge() # Randomly sample negative edges
         criterion = nn.BCEWithLogitsLoss()
-    elif args.SSL_2D_mode == 'AM':
+
+
+    elif args.SSL_2D_mode == 'AM':  # Randomly masks an atom, and optionally masks edges connecting to it.
         transform = MaskAtom(num_atom_type=119, num_edge_type=5,
                              mask_rate=args.mask_rate, mask_edge=args.mask_edge)
         criterion = nn.CrossEntropyLoss()
-    elif args.SSL_2D_mode == 'CP':
+
+
+    elif args.SSL_2D_mode == 'CP': # 从数据对象中随机选取一个节点，并添加两个属性：
+                                   # 一个是以该节点为中心的 k 跳邻居子结构，
+                                   # 另一个是表示 l1 到 l2 跳距离范围内子图的上下文子结构。   
         l1 = args.num_layer - 1
         l2 = l1 + args.csize
         transform = ExtractSubstructureContextPair(args.num_layer, l1, l2)
         criterion = nn.BCEWithLogitsLoss()
-    elif args.SSL_2D_mode == 'IG':
+
+    # GraphMVP-C = Contrastive  # IG, GraphCL, JOAO, JOAOv2 == do_InfoGraph, do_GraphCL, do_GraphCLv2
+    elif args.SSL_2D_mode == 'IG': 
         criterion = nn.BCEWithLogitsLoss()
 
     data_root = '../datasets/{}/'.format(args.dataset) \
@@ -288,16 +299,25 @@ if __name__ == '__main__':
     else:
         dataset = Molecule3DMaskingDataset(data_root, dataset=args.dataset, transform=transform, mask_ratio=args.SSL_masking_ratio)
 
+    # GraphMVP-G = Generative  # EP, AM, CP == do_EdgePred, do_AttrMasking, do_ContextPred
     if args.SSL_2D_mode == 'EP':
         loader = DataLoaderAE(dataset, batch_size=args.batch_size,
                               shuffle=True, num_workers=args.num_workers)
+
+
+
     elif args.SSL_2D_mode == 'AM':
         loader = DataLoaderMasking(dataset, batch_size=args.batch_size,
                                    shuffle=True, num_workers=args.num_workers)
+
+
+
     elif args.SSL_2D_mode == 'CP':
         loader = DataLoaderSubstructContext3D(dataset, batch_size=args.batch_size,
                                               shuffle=True, num_workers=args.num_workers)
-    else:  # IG, GraphCL, JOAO, JOAOv2
+
+    else:  # GraphMVP-C = Contrastive  # IG, GraphCL, JOAO, JOAOv2
+           # IG, GraphCL, JOAO, JOAOv2 == do_InfoGraph, do_GraphCL, do_GraphCLv2
         loader = DataLoader(dataset, batch_size=args.batch_size,
                             shuffle=True, num_workers=args.num_workers)
 
@@ -334,11 +354,15 @@ if __name__ == '__main__':
         infograph_discriminator_SSL_model = Discriminator(args.emb_dim).to(device)
         SSL_2D_support_model_list.append(infograph_discriminator_SSL_model)
 
+
+
     # set up 2D SSL model for AM
     molecule_atom_masking_model = None
     if args.SSL_2D_mode == 'AM':
         molecule_atom_masking_model = torch.nn.Linear(args.emb_dim, 119).to(device)
         SSL_2D_support_model_list.append(molecule_atom_masking_model)
+
+
 
     # set up 2D SSL model for CP
     molecule_context_model = None

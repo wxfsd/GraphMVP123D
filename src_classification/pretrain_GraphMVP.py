@@ -59,19 +59,26 @@ def train(args, molecule_model_2D, device, loader, optimizer):
     for step, batch in enumerate(l):
         batch = batch.to(device)
 
-        node_repr = molecule_model_2D(batch.x, batch.edge_index, batch.edge_attr)
-        molecule_2D_repr = molecule_readout_func(node_repr, batch.batch)
+        # print("SMILES:", batch.smiles)
 
+        # GIN model
+        node_repr = molecule_model_2D(batch.x, batch.edge_index, batch.edge_attr) # atom:[11620, 2], edge_index:[2,24274], edge_attr:[24274,2] -> [256, 300]
+        molecule_2D_repr = molecule_readout_func(node_repr, batch.batch) # global_mean_pool
+
+        # print('batch:',batch)
         if args.model_3d == 'schnet':
-            molecule_3D_repr = molecule_model_3D(batch.x[:, 0], batch.positions, batch.batch)
+            molecule_3D_repr = molecule_model_3D(batch.x[:, 0], batch.positions, batch.batch)  # [11620], [11620, 3], [11620] -> [256, 300]
 
+        # 公式7，中的Loss-CL,  Loss-CL = L-InfoNCE or L-EBM_NCE
+        CL_loss, CL_acc = dual_CL(molecule_2D_repr, molecule_3D_repr, args) # [256, 300], [256, 300] -> [1], [1]
 
-        CL_loss, CL_acc = dual_CL(molecule_2D_repr, molecule_3D_repr, args)
-        AE_loss_1 = AE_2D_3D_model(molecule_2D_repr, molecule_3D_repr)
-        AE_loss_2 = AE_3D_2D_model(molecule_3D_repr, molecule_2D_repr)
+        # 公式7，中的Loss-G == Loss-VRR
+        AE_loss_1 = AE_2D_3D_model(molecule_2D_repr, molecule_3D_repr) # [256, 300], [256, 300] -> [1] # 公式6中的第一项
+        AE_loss_2 = AE_3D_2D_model(molecule_3D_repr, molecule_2D_repr) # [256, 300], [256, 300] -> [1] # 公式6中的第二项
         AE_acc_1 = AE_acc_2 = 0
-        AE_loss = (AE_loss_1 + AE_loss_2) / 2
-
+        AE_loss = (AE_loss_1 + AE_loss_2) / 2 # L-G = L-VRR = 1/2(左向重建+右向重建) + β⋅KL_terms
+        
+        #############################
         CL_loss_accum += CL_loss.detach().cpu().item()
         CL_acc_accum += CL_acc
         AE_loss_accum += AE_loss.detach().cpu().item()
@@ -92,6 +99,8 @@ def train(args, molecule_model_2D, device, loader, optimizer):
     CL_acc_accum /= len(loader)
     AE_loss_accum /= len(loader)
     AE_acc_accum /= len(loader)
+    
+    # 最终Loss
     temp_loss = args.alpha_1 * CL_loss_accum + args.alpha_2 * AE_loss_accum
     if temp_loss < optimal_loss:
         optimal_loss = temp_loss
@@ -109,19 +118,25 @@ if __name__ == '__main__':
         torch.cuda.manual_seed_all(0)
         torch.cuda.set_device(args.device)
 
+    # print('args.dataset',args.dataset)
+    # args.input_data_dir = '/nfs_home/xiaofeng/zhen/GraphMVP_xf/datasets'
+    # args.dataset = 'GEOM_3D_nmol50000_nconf5_nupper1000' 
     if 'GEOM' in args.dataset:
         data_root = '../datasets/{}/'.format(args.dataset) if args.input_data_dir == '' else '{}/{}/'.format(args.input_data_dir, args.dataset)
         dataset = Molecule3DMaskingDataset(data_root, dataset=args.dataset, mask_ratio=args.SSL_masking_ratio)
     else:
         raise Exception
+        
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
 
     # set up model
+    # 这个是定义的 GNN 模型（如 GIN、GCN、GAT等），也就是 GNN-2D
     molecule_model_2D = GNN(args.num_layer, args.emb_dim, JK=args.JK, drop_ratio=args.dropout_ratio, gnn_type=args.gnn_type).to(device)
     molecule_readout_func = global_mean_pool
 
     print('Using 3d model\t', args.model_3d)
     molecule_projection_layer = None
+    # 这个是定义的 GNN 模型（如 GIN、GCN、GAT等），也就是 GNN-3D
     if args.model_3d == 'schnet':
         molecule_model_3D = SchNet(
             hidden_channels=args.emb_dim, num_filters=args.num_filters, num_interactions=args.num_interactions,

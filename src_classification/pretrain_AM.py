@@ -18,9 +18,9 @@ def compute_accuracy(pred, target):
 
 
 def do_AttrMasking(batch, criterion, node_repr, molecule_atom_masking_model):
-    target = batch.mask_node_label[:, 0]
-    node_pred = molecule_atom_masking_model(node_repr[batch.masked_atom_indices])
-    attributemask_loss = criterion(node_pred.double(), target)
+    target = batch.mask_node_label[:, 0]  # terget是原子类型  # [1868]
+    node_pred = molecule_atom_masking_model(node_repr[batch.masked_atom_indices]) # Linear(node_repr_masked_atom) # [1868, 119]
+    attributemask_loss = criterion(node_pred.double(), target) # [1]
     attributemask_acc = compute_accuracy(node_pred, target)
     return attributemask_loss, attributemask_acc
 

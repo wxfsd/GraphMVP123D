@@ -2,7 +2,6 @@
 import logging
 import random
 from math import sqrt
-
 import networkx as nx
 import numpy as np
 import torch
@@ -10,8 +9,195 @@ import torch.nn as nn
 import torch.nn.functional as F
 from rdkit.Chem import AllChem
 from scipy import stats
-
 from datasets import graph_data_obj_to_nx_simple, nx_to_graph_data_obj_simple
+
+class CrossModalTransformerFusion(nn.Module):
+    def __init__(self, dim_1d=1024, dim_2d=300, dim_3d=300, hidden_dim=512, out_dim=300, num_heads=4, num_layers=1):
+        super().__init__()
+
+        # 将各模态特征映射到统一维度
+        self.linear_1d = nn.Linear(dim_1d, hidden_dim)
+        self.linear_2d = nn.Linear(dim_2d, hidden_dim)
+        self.linear_3d = nn.Linear(dim_3d, hidden_dim)
+
+        # Positional encoding (可选，可省略)
+        self.pos_emb = nn.Parameter(torch.randn(3, hidden_dim))  # 3 个模态 token 的位置嵌入
+
+        # Transformer Encoder 层
+        encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=num_heads, batch_first=True)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        # 输出映射
+        self.out_proj = nn.Linear(hidden_dim, out_dim)
+
+    def forward(self, feat_1d, feat_2d, feat_3d):
+        # 投影到统一空间
+        f1 = self.linear_1d(feat_1d)  # [B, H]
+        f2 = self.linear_2d(feat_2d)  # [B, H]
+        f3 = self.linear_3d(feat_3d)  # [B, H]
+
+        # 拼接模态 token：[B, 3, H]
+        x = torch.stack([f1, f2, f3], dim=1)
+
+        # 添加位置编码
+        x = x + self.pos_emb.unsqueeze(0)
+
+        # 送入 Transformer
+        x = self.transformer(x)  # [B, 3, H]
+
+        # 聚合方式：可以使用 mean/max/first-token 等
+        fused = x.mean(dim=1)  # [B, H]
+
+        return self.out_proj(fused)
+
+class CrossModalGatedFusion(nn.Module):
+    def __init__(self, dim_1d=1024, dim_2d=300, dim_3d=300, hidden_dim=512, out_dim=300):
+        super().__init__()
+
+        # 线性映射到共同维度
+        self.linear_1d = nn.Linear(dim_1d, hidden_dim)
+        self.linear_2d = nn.Linear(dim_2d, hidden_dim)
+        self.linear_3d = nn.Linear(dim_3d, hidden_dim)
+
+        # gating 网络：输出 3个模态的权重
+        self.gate_net = nn.Sequential(
+            nn.Linear(hidden_dim * 3, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 3),  # 输出每个模态的权重
+        )
+
+        self.out_proj = nn.Linear(hidden_dim, out_dim)
+
+    def forward(self, feat_1d, feat_2d, feat_3d):
+        # 映射到相同的隐藏维度
+        f1 = self.linear_1d(feat_1d)
+        f2 = self.linear_2d(feat_2d)
+        f3 = self.linear_3d(feat_3d)
+
+        # 拼接后送入 gate 网络，得到每个模态的注意力权重（batch_size, 3）
+        concat_feats = torch.cat([f1, f2, f3], dim=1)
+        raw_weights = self.gate_net(concat_feats)
+        weights = F.softmax(raw_weights, dim=1)
+
+        # 分别提取权重并应用
+        w1 = weights[:, 0].unsqueeze(1)
+        w2 = weights[:, 1].unsqueeze(1)
+        w3 = weights[:, 2].unsqueeze(1)
+
+        # 加权求和，得到融合向量
+        fused = w1 * f1 + w2 * f2 + w3 * f3  # shape: [batch_size, hidden_dim]
+
+        return self.out_proj(fused)  # 输出统一维度
+
+
+class CrossModalWeightedFusion(nn.Module):
+    def __init__(self, dim_1d=1024, dim_2d=300, dim_3d=300, out_dim=300):
+        super().__init__()
+        self.linear_1d = nn.Linear(dim_1d, out_dim)
+        self.linear_2d = nn.Linear(dim_2d, out_dim)
+        self.linear_3d = nn.Linear(dim_3d, out_dim)
+
+        # 可学习的权重参数（初始值为1.0）
+        self.alpha = nn.Parameter(torch.tensor(1.0))
+        self.beta = nn.Parameter(torch.tensor(1.0))
+        self.gamma = nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, feat_1d, feat_2d, feat_3d):
+        # 映射到同一维度
+        f1 = self.linear_1d(feat_1d)
+        f2 = self.linear_2d(feat_2d)
+        f3 = self.linear_3d(feat_3d)
+        '''
+        print('1d', feat_1d.shape)
+        print('2d', feat_2d.shape)
+        print('3d', feat_3d.shape)
+        '''
+
+        # Softmax 归一化后加权
+        weights = torch.softmax(torch.stack([self.alpha, self.beta, self.gamma]), dim=0)
+        fused = weights[0] * f1 + weights[1] * f2 + weights[2] * f3
+        return fused
+
+
+class CrossModalAttentionFusion_Residual(nn.Module):
+    def __init__(self, dim_1d=1024, dim_2d=300, dim_3d=300, hidden_dim=512, out_dim=300, num_heads=4, dropout=0.1):
+        super().__init__()
+        self.linear_1d = nn.Linear(dim_1d, hidden_dim)
+        self.linear_2d = nn.Linear(dim_2d, hidden_dim)
+        self.linear_3d = nn.Linear(dim_3d, hidden_dim)
+
+        self.attn = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=num_heads, batch_first=True)
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+
+        self.project = nn.Linear(hidden_dim, out_dim)  # 控制输出维度
+        self.out_norm = nn.LayerNorm(out_dim)          # 输出归一化，增强稳定性
+
+    def forward(self, feat_1d, feat_2d, feat_3d):
+        # 1D 做 query，2D+3D 做 key/value
+        q = self.linear_1d(feat_1d).unsqueeze(1)                    # [B, 1, H]
+        k = torch.stack([
+            self.linear_2d(feat_2d),
+            self.linear_3d(feat_3d)
+        ], dim=1)                                                  # [B, 2, H]
+        v = k
+
+        # Multi-head attention
+        attn_output, _ = self.attn(q, k, v)                         # [B, 1, H]
+        attn_output = attn_output.squeeze(1)                       # [B, H]
+
+        # Residual + norm
+        residual = self.linear_1d(feat_1d)
+        fused = self.norm(attn_output + residual)                  # [B, H]
+        fused = self.dropout(fused)
+
+        # Project to final fusion space
+        fused_out = self.project(fused)
+        fused_out = self.out_norm(fused_out)
+        return fused_out                                           # [B, out_dim]
+
+
+# 交叉注意力融合
+class CrossModalAttentionFusion(nn.Module):
+    def __init__(self, dim_1d=1024, dim_2d=300, dim_3d=300, hidden_dim=512, out_dim=300, num_heads=4):
+        super().__init__()
+        self.linear_1d = nn.Linear(dim_1d, hidden_dim)
+        self.linear_2d = nn.Linear(dim_2d, hidden_dim)
+        self.linear_3d = nn.Linear(dim_3d, hidden_dim)
+        self.attn = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=num_heads, batch_first=True)
+        self.proj = nn.Linear(hidden_dim, out_dim)
+
+    def forward(self, feat_1d, feat_2d, feat_3d):
+        q = self.linear_1d(feat_1d).unsqueeze(1)
+        k = torch.stack([self.linear_2d(feat_2d), self.linear_3d(feat_3d)], dim=1)
+        v = k
+        attn_output, _ = self.attn(q, k, v)
+        return self.proj(attn_output.squeeze(1))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 logger = logging.getLogger()
 logging.basicConfig(level=logging.INFO)
@@ -31,17 +217,21 @@ def do_CL(X, Y, args):
 
     if args.CL_similarity_metric == 'InfoNCE_dot_prod':
         criterion = nn.CrossEntropyLoss()
-        B = X.size()[0]
-        logits = torch.mm(X, Y.transpose(1, 0))  # B*B
-        logits = torch.div(logits, args.T)
-        labels = torch.arange(B).long().to(logits.device)  # B*1
+        B = X.size()[0] # 256
+        
+        # 对应于论文中的公式3，InfoNCE的公式
+        logits = torch.mm(X, Y.transpose(1, 0))  # B*B # [256, 256]
+        logits = torch.div(logits, args.T) # [256, 256]
+        labels = torch.arange(B).long().to(logits.device)  # B*1 # 256
 
-        CL_loss = criterion(logits, labels)
-        pred = logits.argmax(dim=1, keepdim=False)
-        CL_acc = pred.eq(labels).sum().detach().cpu().item() * 1. / B
+        CL_loss = criterion(logits, labels) # [1]
+        pred = logits.argmax(dim=1, keepdim=False) # [256]
+        CL_acc = pred.eq(labels).sum().detach().cpu().item() * 1. / B  # [1]
 
     elif args.CL_similarity_metric == 'EBM_dot_prod':
         criterion = nn.BCEWithLogitsLoss()
+        
+        # 对应于论文中的公式4，EBM-NCE的公式
         neg_Y = torch.cat([Y[cycle_index(len(Y), i + 1)]
                            for i in range(args.CL_neg_samples)], dim=0)
         neg_X = X.repeat((args.CL_neg_samples, 1))
@@ -65,12 +255,23 @@ def do_CL(X, Y, args):
 
 
 def dual_CL(X, Y, args):
-    CL_loss_1, CL_acc_1 = do_CL(X, Y, args)
-    CL_loss_2, CL_acc_2 = do_CL(Y, X, args)
+    # 论文中公式 (3），包括了两个方向：anchor = x → 对比 y, yⱼ ; anchor = y → 对比 x, xⱼ, 严格匹配 InfoNCE 的双向对比目标！
+    CL_loss_1, CL_acc_1 = do_CL(X, Y, args) # [1], [1]
+    CL_loss_2, CL_acc_2 = do_CL(Y, X, args) # [1], [1]
     return (CL_loss_1 + CL_loss_2) / 2, (CL_acc_1 + CL_acc_2) / 2
 
 
 def do_GraphCL(batch1, batch2, molecule_model_2D, projection_head, molecule_readout_func):
+
+    # 虽然你论文中没提 GraphCL，但你代码实现了更通用的增强对比方法
+    # 和 GraphMVP 思路一致，适合后续扩展 “GraphMVP-C” 模型，即加入 2D-contrastive loss。
+
+    # def do_GraphCL(batch1, batch2, model, head, readout):
+            # h₁ = head(readout(model(batch1)))
+            # h₂ = head(readout(model(batch2)))
+            # sim = exp(dot(h₁, h₂) / T)
+            # InfoNCE-style loss
+
     x1 = molecule_model_2D(batch1.x, batch1.edge_index, batch1.edge_attr)
     x1 = molecule_readout_func(x1, batch1.batch)
     x1 = projection_head(x1)
@@ -86,6 +287,7 @@ def do_GraphCL(batch1, batch2, molecule_model_2D, projection_head, molecule_read
 
     sim_matrix = torch.einsum('ik,jk->ij', x1, x2) / torch.einsum('i,j->ij', x1_abs, x2_abs)
     sim_matrix = torch.exp(sim_matrix / T)
+
     pos_sim = sim_matrix[range(batch), range(batch)]
     loss = pos_sim / (sim_matrix.sum(dim=1) - pos_sim)
     loss = - torch.log(loss).mean()
@@ -392,15 +594,15 @@ class MaskAtom:
         if masked_atom_indices is None:
             # sample x distinct atoms to be masked, based on mask rate. But
             # will sample at least 1 atom
-            num_atoms = data.x.size()[0]
-            sample_size = int(num_atoms * self.mask_rate + 1)
-            masked_atom_indices = random.sample(range(num_atoms), sample_size)
+            num_atoms = data.x.size()[0] # 48, Atom num of 1 molecule.
+            sample_size = int(num_atoms * self.mask_rate + 1) # [8]
+            masked_atom_indices = random.sample(range(num_atoms), sample_size) # [36, 27, 6, 43, 24, 31, 2, 18]
 
         # create mask node label by copying atom feature of mask atom
         mask_node_labels_list = []
         for atom_idx in masked_atom_indices:
             mask_node_labels_list.append(data.x[atom_idx].view(1, -1))
-        data.mask_node_label = torch.cat(mask_node_labels_list, dim=0)
+        data.mask_node_label = torch.cat(mask_node_labels_list, dim=0) # [8, 2]
         data.masked_atom_indices = torch.tensor(masked_atom_indices)
 
         # modify the original node feature of the masked node

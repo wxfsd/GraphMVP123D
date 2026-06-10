@@ -76,37 +76,45 @@ class SchNet(torch.nn.Module):
         if self.atomref is not None:
             self.atomref.weight.data.copy_(self.initial_atomref)
 
-    def forward(self, z, pos, batch=None):
+    def forward(self, z, pos, batch=None): # (batch.x[:, 0] , batch.positions, batch.batch)
+        # z = 原子类型特征
+        # T3D  ==  对原子坐标和距离的变换、构图、距离展开 == radius_graph、GaussianSmearing、余弦截断等
+
         assert z.dim() == 1 and z.dtype == torch.long
         batch = torch.zeros_like(z) if batch is None else batch
+        # 原子特征处理
+        h = self.embedding(z)  # z:[11620] -> (119,300) -> [11620,300]
+        # 3D几何特征处理
+        edge_index = radius_graph(pos, r=self.cutoff, batch=batch) # 基于坐标 𝑅 构建边，即构造 𝑔3𝐷 的邻接结构; # [2, 365877]
+        row, col = edge_index  # [365877], [365877]
+        edge_weight = (pos[row] - pos[col]).norm(dim=-1)  # 是边之间的距离（欧几里得范数） # [365877]
+        edge_attr = self.distance_expansion(edge_weight)  # GaussianSmearing → 将距离 edge_weight 投影为高斯核展开，用于后续神经网络输入; # [365877, 51]
 
-        h = self.embedding(z)
+        for interaction in self.interactions:  # 在 CFConv 中
+            h = h + interaction(h, edge_index, edge_weight, edge_attr) # [11620,300]，[2, 365877]，[365877]，[365877, 51]； 处理3D集合图的特征
 
-        edge_index = radius_graph(pos, r=self.cutoff, batch=batch)
-        row, col = edge_index
-        edge_weight = (pos[row] - pos[col]).norm(dim=-1)
-        edge_attr = self.distance_expansion(edge_weight)
-
-        for interaction in self.interactions:
-            h = h + interaction(h, edge_index, edge_weight, edge_attr)
-
+        # 类似于 transformer/bert 或 GNN 中的 FFN（前馈网络）头部；
+        # 承担从节点表征空间提取最终图嵌入前的非线性变换；
+        # 这部分 属于 GNN-3D 的组成部分，它们不构建结构，但调整特征空间
         h = self.lin1(h)
         h = self.act(h)
         h = self.lin2(h)
 
-        if self.dipole:
+
+        # 这些是可选项（根据任务决定）
+        if self.dipole: # 表示是否做偶极矩预测，涉及中心质计算
             # Get center of mass.
             mass = self.atomic_mass[z].view(-1, 1)
             c = scatter(mass * pos, batch, dim=0) / scatter(mass, batch, dim=0)
             h = h * (pos - c[batch])
 
-        if not self.dipole and self.mean is not None and self.std is not None:
+        if not self.dipole and self.mean is not None and self.std is not None:  # 表示是否做标准化处理（常用于回归）
             h = h * self.std + self.mean
 
-        if not self.dipole and self.atomref is not None:
+        if not self.dipole and self.atomref is not None: # 表示是否加入元素的参考值补偿（物理先验）
             h = h + self.atomref(z)
-
-        out = scatter(h, batch, dim=0, reduce=self.readout)
+        # h: [11620, 300], batch:[11620] -> out: [256,300]
+        out = scatter(h, batch, dim=0, reduce=self.readout) # 这是最终将节点级表示聚合为图级表示ℎ3𝐷的地方
 
         if self.dipole:
             out = torch.norm(out, dim=-1, keepdim=True)
@@ -172,7 +180,7 @@ class CFConv(MessagePassing):
         self.lin2.bias.data.fill_(0)
 
     def forward(self, x, edge_index, edge_weight, edge_attr):
-        C = 0.5 * (torch.cos(edge_weight * PI / self.cutoff) + 1.0)
+        C = 0.5 * (torch.cos(edge_weight * PI / self.cutoff) + 1.0)  # SchNet 的 余弦截断函数Cosine Cutoff，这也是一种经典的空间局部性限制变换。
         W = self.nn(edge_attr) * C.view(-1, 1)
 
         x = self.lin1(x)
